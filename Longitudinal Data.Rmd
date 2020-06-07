@@ -1,0 +1,345 @@
+---
+title: "Longitudinal Analysis"
+author: "Ji Hun Lee"
+date: "June 5, 2020"
+output: html_document
+---
+
+What is longitudinal data and how can you analyze it? Here you will learn all about this kind of data and the descriptive analyses that can be used to explore it! You will also learn to model continuous and binary outcome variables. Linear mixed effects models will be used as a modern approach to modeling this kind of data, taking into account the correlated nature of it. For binary outcomes, generalized estimating equations will be introduced as an alternative to the generalized linear mixed models. Visualizations are used throughout the course to interpret model results and strategies for model selection are also explored. Along the way, you will use data from a number of longitudinal studies, including the Madras and Calcium datasets.
+
+This chapter introduces the user to longitudinal data. Exploration of what is and what isn't longitudinal data, exploration of the dependent data structure, and other numeric summaries of the data will be covered in this chapter.
+
+
+Longitudinal data are on 3 or more measurements on same unit
+It must have multiple units
+Units are often individuals, but can be businesses, organizations, etc
+
+Longitudinal data are not multiple measurements for a single unit. Time series analyses can be used for this and common inn business.
+
+Two measurements for unit are not longitudinal data. For example, pre/post data, trajectories can not be explored with only two measurements, linear regression or t-tsts are options for these data 
+
+```{r message = FALSE}
+library(nlme) # BodyWeight
+library(lme4) # lmer()
+library(dplyr) # count(), select(), mutate(), filter(), group_by()
+library(tidyr) # spread(), gather()
+library(corrr) # correlate(), shave(), fashion()
+library(MuMIn) # rs.quaredGLMM(), comparing explained variance
+library(ggplot2)  # visualization
+library(AICcmodavg) # aictab(), comparing AICc
+```
+
+```{r}
+data(BodyWeight)
+```
+
+```{r}
+head(BodyWeight)
+BodyWeight %>% count(Time)
+```
+
+This is a balanced data.
+
+# Data Preprocessing
+
+Data are often in wide format where each measurement occasion is stored as a separate column with one row for each individual unit.
+
+Analysis in R are in long format. Measurements are stacked on top of one another and Variables for time and the measurement value
+
+To calculate correlations over time using wide format.
+
+In R, numbers cannot be column names.
+
+In tidyr's spread() function, do not use - (unlike gather). Do not select columns first before spread.
+```{r}
+BodyWeight_wide1 <-
+  BodyWeight %>%
+  mutate(Time = paste0('Time_', Time),
+         Diet = paste0('Diet_', Diet))  %>%
+  spread(key = Diet, value = weight)
+
+BodyWeight_wide2 <-
+  BodyWeight %>%
+  mutate(Time = paste0('Time_', Time),
+         Diet = paste0('Diet_', Diet))  %>%
+  spread(key = Time, value = weight)
+
+glimpse(BodyWeight_wide1)
+head(BodyWeight_wide1)
+dim(BodyWeight_wide1)
+View(BodyWeight_wide1)
+View(BodyWeight_wide2)
+```
+
+Because subjects received different treatments across time, it's better to spread columns across time rather than treatment types
+
+```{r}
+BodyWeight_corr <-
+  BodyWeight_wide2 %>%
+  select(-c(Diet, Rat)) %>%
+  correlate() %>%
+  shave(upper = FALSE) %>%
+  fashion(decimals = 3)
+BodyWeight_corr
+```
+Correlations over time measure dependency of multiple measurements for longitudinal data. Does correlation change over time? the corrr R package will be used to explore correlations. Computing correlations over time can help identify the correlation structure and how strong the dependency is due to repeated measures.
+
+
+```{r}
+# Calculate descriptive statistics
+BodyWeight %>%
+  # Group by visit and group
+  group_by(Time, Diet) %>%
+  # Calculate summary stats of weight
+  summarize(mean_weight = mean(weight, na.rm = TRUE),
+           median_weight = median(weight, na.rm = TRUE),
+           minimum_weight = min(weight, na.rm = TRUE),
+           maximum_weight = max(weight, na.rm = TRUE),
+           standev_weight = sd(weight, na.rm = TRUE),
+           num_miss = sum(is.na(weight)),
+           n = n())
+```
+
+
+WE nee to explore the outcome distribution at each time point. 
+```{r}
+# Visualize distributions of outcome over time
+ggplot(BodyWeight, aes(x = factor(Time), y = weight)) +  # time variable must be factored or will be pooled
+  geom_violin(aes(fill = Diet)) + 
+  xlab("Time of Diets") + 
+  ylab("Weights") + 
+  theme_bw(base_size = 16)
+```
+
+The resulting figure shows skewed distributions for rats with diets one and three, but these two diets have similar variation. Diet two differs from other with larger variation. 
+
+random intercept model
+Fitting unconditional models, with no predictors besides the time variable or trend, is an important first step when exploring the data and gives insight into the data to be explored. 
+```{r}
+# Unconditional model
+uncond_model <- lmer(bmd ~ 1 + visit + (1 | person),
+                     data = calcium)
+
+# Show model output
+summary(uncond_model)
+```
+
+Restructure time variable
+Thinking about the metric of the time variable is a very important step when fitting a longitudinal model. Having the time variable in a correct metric directly helps interpretation for the fixed effect intercept and can aid in the answering questions of interest.
+```{r}
+# Alter the visit variable to start at 0
+calcium_0 <- calcium %>%
+  mutate(visit = visit - 1)
+
+# Fit random intercept model with new time variable
+uncond_model_0 <- lmer(bmd ~ 1 + visit + (1 | person),
+                       data = calcium_0)
+summary(uncond_model_0)
+```
+
+# Random Effect Slope Model
+
+Adding another random effect for the time effect allows individual slopes to vary about the average time trend. The addition of this term also aids in adjusting for the dependency due to repeated measures. Therefore, random slopes are a common addition when modeling longitudinal data.
+
+random effect on slope adds slope and correlation betwen slope and intercept term 
+
+Which model is better?
+Use anova() # fit AIC or BIC; anova compares nested models 
+smaller log-likelihood ; AIC is recommended when the true model is not included in the comparison 
+```{r}
+# Random slope
+uncond_model_rs <- lmer(bmd ~ 1 + visit + (1 + visit | person),
+                        data = calcium)
+
+# Explore output 
+summary(uncond_model_rs)
+
+# Compare random slopes and random intercept only models
+anova(uncond_model_0, uncond_model_rs)
+```
+
+# Visualizing Longitudinal Model
+
+The random intercepts add a unique starting point for each person.
+```{r}
+# Create predicted values for random intercept only model
+calcium_vis <- calcium %>%
+  mutate(pred_values_ri = predict(uncond_model_0))
+  
+# Visualize predicted values vs. visit
+ggplot(calcium_vis, aes(x = visit, y = pred_values_ri)) + 
+  # Group by person
+  geom_line(aes(group = person), size = 1, color = 'gray70') + 
+  xlab("Visit Number") +
+  ylab("Model Predicted Bone Mineral Density (g/cm^2)") + 
+  theme_bw(14)
+```
+
+The random intercepts add a unique starting point and the random slope adds a unique slope term for each person.
+```{r}
+# Create predicted values for random intercept and slope model
+calcium_vis <- calcium %>%
+  mutate(pred_values_rs = predict(uncond_model_rs))
+
+# Visualize predicted values vs. visit
+ggplot(calcium_vis, aes(x = visit, y= pred_values_rs)) + 
+  # Group by person
+  geom_line(aes(group=person), size = 1, color = "gray70") + 
+  xlab("Visit Number") +
+  ylab("Model Predicted Bone Mineral Density (g/cm^2)") + 
+  theme_bw()
+```
+
+```{r}
+corr_structure <- function(object, num_timepoints, intercept_only = TRUE) {
+  variance <- VarCorr(object)
+  if(intercept_only) {
+    random_matrix <- as.matrix(object@pp$X[1:num_timepoints, 1])
+    var_cor <- random_matrix %*% variance[[1]][1] %*% t(random_matrix) +
+      diag(attr(variance,
+      "sc")^2, nrow = num_timepoints,
+      ncol = num_timepoints)
+  } else {
+    random_matrix <- as.matrix(object@pp$X[1:num_timepoints, ])
+    var_cor <- random_matrix %*% variance[[1]][1:2, 1:2] %*%
+      t(random_matrix) + diag(attr(variance,
+        "sc")^2,
+      nrow = num_timepoints, ncol = num_timepoints)
+  }
+  Matrix::cov2cor(var_cor)
+}
+```
+
+explore the model implied correlations when using a random intercept and slope model. 
+```{r}
+# Random intercept and slope model
+random_slope <- lmer(bmd ~ 1 + visit + (1 + visit | person),
+                    data = calcium)
+
+# Generate model implied correlation matrix
+mod_corr <- corr_structure(random_slope, num_timepoints = 5, intercept_only = FALSE)
+mod_corr
+
+# Create visualization for correlation structure
+ggcorr(data = NULL, cor_matrix = mod_corr, midpoint = NULL, 
+       limits = NULL, label = TRUE, label_round = 3, label_size = 5, 
+       nbreaks = 100, palette = 'PuBuGn')
+```
+
+Add predictor variables to build up the fixed effects to explain the variation and differentiate the average trend. After fitting an unconditional model (intercept with time metric) and exploring different random effect structures, it is often of interest to add other covariates. These covariates are used to explain variation in the outcome variable for both the intercept and aggregate trend.
+```{r}
+# Modify the formula to include age as a fixed effect
+bmd_group_age <- lmer(bmd ~ 1 + visit + group + age + (1 + visit | person),
+                   data = calcium)
+
+# View summary
+summary(bmd_group_age)
+```
+
+fixed effect oefficients represent deviation from intercept 
+Random effect stanard errors are variane of intercept and slope after adjusting for the fixe effects.
+Variance for intercept reduced substantially while variance for slope remained the same. 
+
+When interpreting output, visualizations can be a great way to understand what the parameters mean and help make the data easier to explain to others. They are particularly helpful when meaningful predictors are in the model.
+```{r}
+# Calculate aggregate trends
+calcium_agg <- calcium %>%
+  mutate(pred_values = predict(bmd_group_age, re.form = NA)) %>%
+  group_by(visit, group) %>%
+  summarize(predicted_bmd = mean(pred_values))
+
+# Visualize the actual bone mineral density values and aggregate (predicted) bone mineral density trend for each treatment group, controlling for age.
+# Plot visit on x-axis, color by group
+ggplot(calcium_agg, aes(x = visit, color = group)) +
+  # Add points with actual bmd on y-axis. Set global x-axis aesthetic of visit, and color by treatment group.
+  # Add a point layer with a y-axis aesthetic of the actual bone mineral density values.
+  geom_point(aes(y = bmd), data = calcium) +
+  # Add lines with predicted bmd on y-axis. Add a line layer with a y-axis aesthetic of the bone mineral density predictions.
+  geom_line(aes(y = predicted_bmd), size = 1.25) +
+  xlab('Visit Number') +
+  ylab('Model Predicted Bone Mineral Density (g/cm^2)')
+```
+
+Given the model results and the visualization that showed the average results by group, There are small differences between the two groups in their starting bone mineral density.. The group variable is not predicting the linear slope. The group variable does not have large differences in their starting bone mineral density.
+
+Adding Interaction terms
+Interaction terms should be between treatment and time (visit, time), and time and other predictor 
+It now changes interpretation of slopes. Change in slope for different treatment groups 
+Random effect shows variation in intercept and linear slope for individual units. This usually leads fo reduction in variane of random effect. 
+```{r}
+# Add interactions between age and visit, and treatment group and visit
+# Specify a random effect of intercept plus visit by person
+bmd_group_age_int  <- lmer( 
+  bmd ~ 1 + visit + group + age + age*visit + group*visit + (1 + visit | person),
+  data = calcium)
+  
+# Summarize the model
+summary(bmd_group_age_int)
+```
+
+We need to check the distribution of residuals. (1)   Draw residuals for each treatment group. We want unimodal, symmetric distribution. (2) We also want random effects to have a normal distribution. It is common to assume that the residuals are normally distributed and have a mean of 0. The residuals should approximately follow these assumptions to be confident in the model results.
+```{r}
+# Add column of model residuals
+calcium <- calcium %>%
+  mutate(model_residuals = residuals(bmd_group_age_int))
+
+# Visualize model residuals on x-axis, color by group
+ggplot(calcium, aes(x = model_residuals, color = group)) + 
+  # Add a density layer
+  geom_density(size = 1.25) + 
+  xlab("Model Residuals") + 
+  theme_bw(base_size = 14)
+# Are the residuals (approximately) normally distributed with a mean of zero?
+# Is there a difference between the distributions of the treatment groups?
+```
+
+It is common to assume the random effects are normally distributed and have a mean of 0. The random effects should approximately follow these assumptions to be confident in the model results. 
+```{r}
+# From previous step
+random_effects_per_person <- ranef(bmd_group_age_int)$person
+random_effects_reshaped <- random_effects_per_person %>%
+  mutate(id = row_number()) %>%
+  gather(key = "variable", value = "value", -id)
+  
+# Map sample to value
+ggplot(random_effects_reshaped, aes(sample = value)) + 
+  # Add a quantile-quantile layer
+  geom_qq() + 
+  # Add a quantile-quantile line layer
+  geom_qq_line() + 
+  facet_wrap(vars(variable), scales = "free_y") + 
+  theme_bw(base_size = 14)
+```
+
+Model Comparison
+
+Compare four models. The models include one with no additional predictors, one with group predicting the starting point (intercept), one with group and age predicting the starting point (intercepts), and finally, a model where group and age are predicting the starting points and the linear trend.
+
+AIC can lead to overfitting in small samples. Use AICc (corected AIC)
+We should use REML (restricted ML = TRUE for lmer()) when only random effects change. REML should be set to FALSE when comparing fixed effect. Use aictab() function to calculate and compare AIC's. It takes two arguments, a list of models to be commpared and the names for the models to be compared. K is the number of parameters, AICc is the statistic of interest, Delta AICc is the change in AICc, AICcWt is the weight of evidence supporting each model 
+```{r}
+list_of_models <- list(
+  'random slope' = bmd_rs, 
+  'group intercept' = bmd_group, 
+  'group and age' = bmd_group_age, 
+  'group and age interaction' = bmd_group_age_int
+)
+
+# Create an AIC model comparison table
+aictab(list_of_models)
+```
+
+Explained variane can help evaluate the model and represents the ratio of explained variance to total variancce. Larger values are better because predictors are better at explaininig more variation in the outcome. 
+```{r}
+# Compute explained variance for random slope only model
+r.squaredGLMM(bmd_rs)
+
+# Compute explained variance for group and age predicting intercepts model
+r.squaredGLMM(bmd_group_age)
+
+# Compute explained variance for interaction model
+r.squaredGLMM(bmd_group_age_int)
+```
+
+Interaction term model: This model seems to have the most support, largest r-squared with smallest AICc.
+
